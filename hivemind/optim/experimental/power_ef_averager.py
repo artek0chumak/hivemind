@@ -68,11 +68,10 @@ class PowerEFGradientAverager(GradientAverager):
             torch.rand((grad.reshape((grad.size(0), -1)).size(1), self.rank), device=accumulate_grads_on)
             for idx, grad in enumerate(self._grads_from_parameters()) if idx not in self._uncompressed_gradients
         )
-        for tensor in self._qs:
+        for tensor in (self._qs + self._gs):
             if tensor is not None:
                 assert tensor.grad_fn is None, "averaged_tensors must be either parameters or leaf tensors"
                 tensor.share_memory_()
-        
 
         super().__init__(
             self._parameters,
@@ -169,14 +168,35 @@ class PowerEFGradientAverager(GradientAverager):
                     new_c = torch.matmul(p, q.t())
                     c.copy_(new_c.reshape(c.size()))
 
-                for c, g, cg in zip(cs, self._gs, compressed_tensors):
+                for c, g in zip(cs, self._gs):
                     torch.add(g, c, out=g)
-                    cg.copy_(g)
 
                 return allreduce.gathered
         except BaseException as e:
             logger.exception(e)
             raise MatchmakingException(f"Unable to run All-Reduce: {e}")
+
+    @contextlib.contextmanager
+    @torch.no_grad()
+    def use_averaged_gradients(self):
+        self._new_averaged_grads = False
+        with self.get_tensors() as averaged_grads:
+            compressed_tensors = [lt for idx, lt in enumerate(averaged_grads) if idx not in self._uncompressed_gradients]
+            old_averaged = [torch.zeros_like(lt) for lt in compressed_tensors]
+            for g, cg, oag in zip(self._gs, compressed_tensors, old_averaged):
+                oag.copy_(cg)
+                cg.copy_(g)
+            try:
+                assert len(averaged_grads) == len(self._parameters)
+                old_grads = [param.grad for param in self._parameters]
+                for param, new_grad in zip(self._parameters, averaged_grads):
+                    param.grad = new_grad
+                yield
+            finally:
+                for param, old_grad in zip(self._parameters, old_grads):
+                    param.grad = old_grad
+            for cg, oag in zip(compressed_tensors, old_averaged):
+                cg.copy_(oag)
 
 
 @torch.jit.script
