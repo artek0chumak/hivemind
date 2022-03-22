@@ -11,7 +11,6 @@ from hivemind.averaging.control import StepControl
 from hivemind.averaging.group_info import GroupInfo
 from hivemind.averaging.load_balancing import load_balance_peers
 from hivemind.averaging.matchmaking import MatchmakingException
-from hivemind.compression import CompressionInfo, TensorRole
 from hivemind.dht import DHT
 from hivemind.optim.power_sgd_averager import PowerSGDGradientAverager
 from hivemind.utils import get_logger
@@ -210,37 +209,3 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
             finally:
                 for param, old_grad in zip(self.parameters, old_grads):
                     param.grad = old_grad
-
-    def get_current_state(self):
-        """
-        Get current gradient averager state and when requested by a newbie peer.
-        """
-        with torch.no_grad(), self.lock_averaged_tensors:
-            grad_averager_buffers = [q for q in self._qs] + [m for m in self._ms]
-            grad_averager_buffers_infos = [
-                CompressionInfo.from_tensor(buffer, key=f"buffer_{key}", role=TensorRole.GRADIENT)
-                for buffer, key in zip(grad_averager_buffers, enumerate(grad_averager_buffers))
-            ]
-
-        metadata = dict(group_bits=self.get_group_bits())
-        return metadata, grad_averager_buffers, grad_averager_buffers_infos
-
-    def load_state_from_peers(self, **kwargs):
-        """
-        Attempt to download the latest optimizer state from peers and update gradient averager buffers.
-        :returns: whether or the averager succeeded in loading parameters
-        """
-        loaded_state = super().load_state_from_peers(**kwargs)
-        if loaded_state is None:
-            return
-
-        metadata, flat_tensors = loaded_state
-        logger.info("Starting loading gradient averager buffers from peers")
-
-        if len(flat_tensors) != len(self._qs + self._ms):
-            logger.error("Failed to load state from peer, received invalid parameters, extras or metadata")
-            return
-
-        with torch.no_grad(), self.lock_averaged_tensors:
-            for local_buffer, loaded_buffer in zip(self._qs + self._ms, flat_tensors):
-                local_buffer.copy_(loaded_buffer, non_blocking=True)
