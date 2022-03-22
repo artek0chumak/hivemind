@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 class AllReducePhases(Enum):
     PHASE_P = 1
     PHASE_Q = 2
-    PHASE_GRAD = 3
+    PHASE_M = 3
 
 
 class PowerEFGradientAverager(PowerSGDGradientAverager):
@@ -121,8 +121,8 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                 ]
 
                 if self.local_epoch % self.grad_averaging_interval == 0:
-                    grad_group_id = group_info.group_id + AllReducePhases.PHASE_GRAD.name.encode()
-                    await self._run_allreduce_inplace_(averaged_grads_via_sgd, group_info, grad_group_id, peer_fractions=peer_fractions, **kwargs)
+                    grad_group_id = group_info.group_id + AllReducePhases.PHASE_M.name.encode()
+                    await self._run_allreduce_inplace_(self._ms, group_info, grad_group_id, peer_fractions=peer_fractions, **kwargs)
 
                 ps = [torch.zeros((get_flatten_greedy_dims(grad)[0], self.rank), device="cpu") for grad in averaged_grads_via_sgd]
                 for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
@@ -153,7 +153,7 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                 for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
                     c = (p @ q.t()).reshape(grad.shape)
                     torch.add(m, c, out=m)
-                    grad.zero_()
+                    torch.sub(grad, m, out=grad)
 
                 return user_gathered
         except BaseException as e:
