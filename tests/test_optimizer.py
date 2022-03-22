@@ -13,6 +13,7 @@ import hivemind
 from hivemind.averaging.control import AveragingStage
 from hivemind.optim.grad_averager import GradientAverager, GradientAveragerFactory
 from hivemind.optim.optimizer import Optimizer
+from hivemind.optim.power_ef_averager import PowerEFGradientAverager
 from hivemind.optim.power_sgd_averager import PowerSGDGradientAverager
 from hivemind.optim.progress_tracker import ProgressTracker
 from hivemind.optim.state_averager import TrainingStateAverager
@@ -22,7 +23,7 @@ from hivemind.utils.crypto import RSAPrivateKey
 @pytest.mark.forked
 @pytest.mark.parametrize(
     "grad_averager_factory",
-    [GradientAverager, partial(PowerSGDGradientAverager, averager_rank=1)],
+    [GradientAverager, partial(PowerSGDGradientAverager, averager_rank=1), partial(PowerEFGradientAverager, averager_rank=1)],
 )
 def test_grad_averager(grad_averager_factory: GradientAveragerFactory):
     parameter_shape = (5, 5)
