@@ -121,7 +121,7 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                     grad for idx, grad in enumerate(averaged_grads) if idx not in self._uncompressed_gradients_indexes
                 ]
 
-                if self.local_epoch % self.grad_averaging_interval:
+                if self.local_epoch % self.grad_averaging_interval == 0:
                     grad_group_id = group_info.group_id + AllReducePhases.PHASE_GRAD.name.encode()
                     await self._run_allreduce_inplace_(averaged_grads_via_sgd, group_info, grad_group_id, peer_fractions=peer_fractions, **kwargs)
 
