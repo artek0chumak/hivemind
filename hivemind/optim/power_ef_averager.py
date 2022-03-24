@@ -12,20 +12,13 @@ from hivemind.averaging.group_info import GroupInfo
 from hivemind.averaging.load_balancing import load_balance_peers
 from hivemind.averaging.matchmaking import MatchmakingException
 from hivemind.dht import DHT
-from hivemind.optim.power_sgd_averager import PowerSGDGradientAverager
+from hivemind.optim.power_sgd_averager import AllReducePhases, PowerSGDGradientAverager
 from hivemind.utils import get_logger
 from hivemind.utils.asyncio import enter_asynchronously
 from hivemind.utils.math import get_flatten_greedy_dims, orthogonalize_
 
 GatheredData = Any
 logger = get_logger(__name__)
-
-
-class AllReducePhases(Enum):
-    PHASE_P = 1
-    PHASE_Q = 2
-    PHASE_M = 3
-
 
 class PowerEFGradientAverager(PowerSGDGradientAverager):
     """
@@ -65,13 +58,10 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
         client_mode: bool = None,
         warn: bool = True,
         min_compression_ratio: float = 0.5,
-        grad_averaging_interval: int = 10,
         averaged_grads: Optional[Sequence[torch.Tensor]] = None,
+        ms: Optional[Sequence[torch.Tensor]] = None,
         **kwargs,
     ):
-        self.grad_averaging_interval = grad_averaging_interval
-        self.local_epoch = 0
-
         super().__init__(
             parameters=parameters,
             averager_rank=averager_rank,
@@ -83,23 +73,9 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
             warn=warn,
             min_compression_ratio=min_compression_ratio,
             averaged_grads=averaged_grads,
+            ms=ms,
             **kwargs,
         )
-
-    @contextlib.contextmanager
-    def _register_allreduce_group(self, group_info: GroupInfo):
-        """Register a given group for one or more all-reduce rounds"""
-        try:
-            for phase in list(AllReducePhases):
-                self._running_groups[group_info.group_id + phase.name.encode()] = asyncio.Future()
-            self._pending_groups_registered.set()
-            yield
-        finally:
-            for phase in list(AllReducePhases):
-                maybe_future = self._running_groups.pop(group_info.group_id + phase.name.encode(), None)
-                if maybe_future and not maybe_future.done():
-                    logger.warning(f"All-reduce group {group_info.group_id + phase.name.encode()} did not finish.")
-            self._pending_groups_registered.set()
 
     async def _aggregate_with_group(self, group_info: GroupInfo, min_vector_size: int, **kwargs) -> GatheredData:
         """Run aggregation in a given group and update tensors in place, return gathered metadata"""
@@ -120,10 +96,6 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                     grad for idx, grad in enumerate(averaged_grads) if idx not in self._uncompressed_gradients_indexes
                 ]
 
-                if self.local_epoch % self.grad_averaging_interval == 0:
-                    grad_group_id = group_info.group_id + AllReducePhases.PHASE_M.name.encode()
-                    await self._run_allreduce_inplace_(self._ms, group_info, grad_group_id, peer_fractions=peer_fractions, **kwargs)
-
                 ps = [torch.zeros((get_flatten_greedy_dims(grad)[0], self.rank), device="cpu") for grad in averaged_grads_via_sgd]
                 for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
                     # we use reshape for all matrixes because PowerEF works only with 2d tensors
@@ -141,6 +113,7 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                 for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
                     c = (grad - m).reshape(-1, q.size(0))
                     torch.matmul(c.t(), p, out=q)
+                    grad.zero_()
 
                 phase_q_tensors = self._qs + [
                     grad for idx, grad in enumerate(averaged_grads) if idx in self._uncompressed_gradients_indexes
@@ -150,36 +123,14 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                     phase_q_tensors, group_info, q_groud_id, peer_fractions=peer_fractions, **kwargs
                 )
 
-                for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
-                    c = (p @ q.t()).reshape(grad.shape)
+                for p, q, m in zip(ps, self._qs, self._ms):
+                    c = (p @ q.t()).reshape(m.shape)
                     torch.add(m, c, out=m)
-                    torch.sub(grad, m, out=grad)
 
                 return user_gathered
         except BaseException as e:
             logger.exception(e)
             raise MatchmakingException(f"Unable to run All-Reduce: {e}")
-
-    def step(
-        self,
-        weight: Optional[float] = None,
-        reset_accumulators: bool = True,
-        control: Optional[StepControl] = None,
-        timeout: Optional[float] = None,
-        wait: bool = True,
-        **kwargs,
-    ):
-        """
-        Average accumulated gradients with peers, optionally load averaged gradients and reset accumulators
-
-        :param weight: overrides the averaging weight; by default, weight equals the number of accumulated samples
-        :param reset_accumulators: by default, set local gradient accumulators to zeros after averaging succeeds
-        :param control: reuse a pre-arranged group of peers (or a matchmaking in progress) from averager.schedule_step
-        :param timeout: if specified, await for averaging round for at most this number of seconds (if wait=True)
-        :param wait: if True, await for the step to finish (or fail), otherwise run all-reduce in background
-        """
-        self.local_epoch += 1
-        return super().step(weight, reset_accumulators, control, timeout, wait, **kwargs)
 
     @contextlib.contextmanager
     @torch.no_grad()

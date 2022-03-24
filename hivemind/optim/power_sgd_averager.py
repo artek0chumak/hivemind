@@ -81,6 +81,7 @@ class PowerSGDGradientAverager(GradientAverager):
         warn: bool = True,
         min_compression_ratio: float = 0.5,
         averaged_grads: Optional[Sequence[torch.Tensor]] = None,
+        ms: Optional[Sequence[torch.Tensor]] = None,
         **kwargs,
     ):
         self.rank = averager_rank
@@ -92,11 +93,17 @@ class PowerSGDGradientAverager(GradientAverager):
             or (1 - self.rank * sum(get_flatten_greedy_dims(grad)) / grad.numel()) < min_compression_ratio
             # compute how much parameters are left after factorization
         )
-        self._ms = [
-            torch.zeros_like(grad, device="cpu").share_memory_()
-            for idx, grad in enumerate(self._grads_from_parameters())
-            if idx not in self._uncompressed_gradients_indexes
-        ]
+        if ms:
+            self._ms = [
+                grad for idx, grad in enumerate(ms)
+                if idx not in self._uncompressed_gradients_indexes
+            ]
+        else:
+            self._ms = [
+                torch.zeros_like(grad, device="cpu").share_memory_()
+                for idx, grad in enumerate(self._grads_from_parameters())
+                if idx not in self._uncompressed_gradients_indexes
+            ]
         self._qs = [
             torch.rand((get_flatten_greedy_dims(grad)[1], self.rank), device="cpu").share_memory_()
             for idx, grad in enumerate(self._grads_from_parameters())

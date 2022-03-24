@@ -184,7 +184,7 @@ class Optimizer(torch.optim.Optimizer):
         delay_optimizer_step: Optional[bool] = None,
         delay_grad_averaging: bool = False,
         delay_state_averaging: bool = True,
-        average_state_every: int = 1,
+        average_state_every: int = 10,
         use_local_updates: bool = False,
         client_mode: bool = None,
         auxiliary: bool = False,
@@ -201,6 +201,10 @@ class Optimizer(torch.optim.Optimizer):
         verbose: bool = False,
     ):
         self._parent_pid = os.getpid()
+
+        params = list(params) if params is not None else optimizer.param_groups
+        if all(isinstance(p, torch.Tensor) for p in params):
+            params = (dict(params=params),)
 
         client_mode = client_mode if client_mode is None else dht.client_mode
         delay_optimizer_step = delay_optimizer_step if delay_optimizer_step is not None else delay_grad_averaging
@@ -250,6 +254,11 @@ class Optimizer(torch.optim.Optimizer):
         self.tracker = self._make_progress_tracker(
             target_batch_size, performance_ema_alpha=performance_ema_alpha, **tracker_opts or {}
         )
+        extra_tensors = []
+        if grad_averager_factory:
+            extra_tensors = [
+                torch.zeros_like(param, device="cpu").share_memory_() for param in params
+            ]
         self.state_averager = self._make_state_averager(
             optimizer=optimizer,
             params=params,
