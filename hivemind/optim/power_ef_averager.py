@@ -99,7 +99,7 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                 ps = [torch.zeros((get_flatten_greedy_dims(grad)[0], self.rank), device="cpu") for grad in averaged_grads_via_sgd]
                 for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
                     # we use reshape for all matrixes because PowerEF works only with 2d tensors
-                    c = (grad - m).reshape(-1, q.size(0))
+                    c = (m - grad).reshape(-1, q.size(0))
                     torch.matmul(c, q, out=p)
 
                 p_group_id = group_info.group_id + AllReducePhases.PHASE_P.name.encode()
@@ -111,9 +111,12 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                     orthogonalize_(p)
 
                 for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
-                    c = (grad - m).reshape(-1, q.size(0))
+                    c = (m - grad).reshape(-1, q.size(0))
                     torch.matmul(c.t(), p, out=q)
-                    grad.zero_()
+
+                for idx, (m, grad) in enumerate(zip(self._ms, averaged_grads)):
+                    if idx in self._uncompressed_gradients_indexes:
+                        grad.copy_(m)
 
                 phase_q_tensors = self._qs + [
                     grad for idx, grad in enumerate(averaged_grads) if idx in self._uncompressed_gradients_indexes
@@ -123,40 +126,19 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                     phase_q_tensors, group_info, q_groud_id, peer_fractions=peer_fractions, **kwargs
                 )
 
-                for p, q, m in zip(ps, self._qs, self._ms):
-                    c = (p @ q.t()).reshape(m.shape)
-                    torch.add(m, c, out=m)
+                for p, q, grad in zip(ps, self._qs, averaged_grads_via_sgd):
+                    grad.add_((p @ q.t()).reshape(m.shape))
 
                 return user_gathered
         except BaseException as e:
             logger.exception(e)
             raise MatchmakingException(f"Unable to run All-Reduce: {e}")
 
-    @contextlib.contextmanager
     @torch.no_grad()
-    def use_averaged_gradients(self):
-        """Substitute model's main gradients with averaged gradients (does not respect device placement)"""
-        self._new_averaged_grads = False
-        with self.get_tensors() as averaged_grads:
-            assert len(averaged_grads) == len(self.parameters)
-            try:
-                old_grads = [param.grad for param in self.parameters]
-
-                param_grads_old_way = [
-                    param for idx, param in enumerate(self.parameters) if idx in self._uncompressed_gradients_indexes
-                ]
-                averaged_grads_old_way = [
-                    grad for idx, grad in enumerate(averaged_grads) if idx in self._uncompressed_gradients_indexes
-                ]
-                for param, new_grad in zip(param_grads_old_way, averaged_grads_old_way):
-                    param.grad = new_grad
-
-                param_grads_via_sgd = [
-                    param for idx, param in enumerate(self.parameters) if idx not in self._uncompressed_gradients_indexes
-                ]
-                for param, m in zip(param_grads_via_sgd, self._ms):
-                    param.grad = m
-                yield averaged_grads
-            finally:
-                for param, old_grad in zip(self.parameters, old_grads):
-                    param.grad = old_grad
+    def load_accumulators_into_averager_(self):
+        """load locally accumulated gradients into the averager for aggregation"""
+        # divide locally accumulated gradients by the number of times they were accumulated
+        grad_scale = (1.0 / self.local_times_accumulated) if self.local_times_accumulated != 0 else 0.0
+        with self.get_tensors():
+            for grad_acc, m in zip(self._grad_accumulators(), self._ms):
+                m.copy_(grad_acc, non_blocking=True).mul_(grad_scale)

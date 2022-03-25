@@ -257,7 +257,9 @@ class Optimizer(torch.optim.Optimizer):
         extra_tensors = []
         if grad_averager_factory:
             extra_tensors = [
-                torch.zeros_like(param, device="cpu").share_memory_() for param in params
+                torch.zeros_like(param, device="cpu").share_memory_()
+                for param_group in params
+                for param in param_group["params"]
             ]
         self.state_averager = self._make_state_averager(
             optimizer=optimizer,
