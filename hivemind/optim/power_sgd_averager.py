@@ -96,7 +96,6 @@ class PowerSGDGradientAverager(GradientAverager):
         if ms:
             self._ms = [
                 grad for idx, grad in enumerate(ms)
-                if idx not in self._uncompressed_gradients_indexes
             ]
         else:
             self._ms = [

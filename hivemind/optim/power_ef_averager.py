@@ -96,8 +96,12 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                     grad for idx, grad in enumerate(averaged_grads) if idx not in self._uncompressed_gradients_indexes
                 ]
 
+                m_via_sgd = [
+                    grad for idx, grad in enumerate(self._ms) if idx not in self._uncompressed_gradients_indexes
+                ]
+
                 ps = [torch.zeros((get_flatten_greedy_dims(grad)[0], self.rank), device="cpu") for grad in averaged_grads_via_sgd]
-                for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
+                for p, q, m, grad in zip(ps, self._qs, m_via_sgd, averaged_grads_via_sgd):
                     # we use reshape for all matrixes because PowerEF works only with 2d tensors
                     c = (m - grad).reshape(-1, q.size(0))
                     torch.matmul(c, q, out=p)
@@ -110,7 +114,7 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                 for p in ps:
                     orthogonalize_(p)
 
-                for p, q, m, grad in zip(ps, self._qs, self._ms, averaged_grads_via_sgd):
+                for p, q, m, grad in zip(ps, self._qs, m_via_sgd, averaged_grads_via_sgd):
                     c = (m - grad).reshape(-1, q.size(0))
                     torch.matmul(c.t(), p, out=q)
 
@@ -127,7 +131,7 @@ class PowerEFGradientAverager(PowerSGDGradientAverager):
                 )
 
                 for p, q, grad in zip(ps, self._qs, averaged_grads_via_sgd):
-                    grad.add_((p @ q.t()).reshape(m.shape))
+                    grad.add_((p @ q.t()).reshape(grad.shape))
 
                 return user_gathered
         except BaseException as e:
